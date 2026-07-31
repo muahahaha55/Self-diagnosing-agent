@@ -1,0 +1,3 @@
+Name: Diagnose Before You Retry: Attributing Tool-Use Failures Inside LLM Agents
+
+One-sentence contribution: We reframe the knowing–doing gap in tool-using agents as a self-attributable signal, and show a training-free control layer that lets an agent distinguish world drift from its own hallucination.

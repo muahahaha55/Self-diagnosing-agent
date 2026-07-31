@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -m pip install mcp openai python-dotenv)",
+      "Bash(python -c \"import code.fs_server\")"
+    ]
+  }
+}
