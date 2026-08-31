@@ -27,6 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from probe_input import build_all
+from probe_config import (AXIS_A_RULES, AXIS_B_RULES, FAIL, NO_SIGNAL, PASS,
+                          ProbeConfig, RuleResult, aggregate)
 
 
 # --------------------------------------------------------------- axis A
@@ -41,21 +43,35 @@ ALLOWED_CHANGE = {
 HARD_DELETE = {"delete_file"}
 
 
-def probe_A(payload: dict) -> tuple[bool, str]:
-    """Return (tool_matches_description, reason).
-    False => tool-side divergence somewhere in the trajectory."""
-    # canary multiplicity: a task writes its canary exactly once, so more than
-    # one occurrence in the world means the write was silently multiplied
-    # (D7 double-append) -- a tool-side divergence even though the change_kind
-    # ('appended') looks legal.
+def _norm(x):
+    """Normalise line endings: the world may store CRLF while the agent
+    submitted LF (or vice versa); a raw startswith would then miss a
+    legitimate agent-composed write."""
+    return x.replace("\r\n", "\n").replace("\r", "\n") if x else x
+
+
+# --------------------------------------------------- axis A rules, one each
+# Each returns a reason string when its condition holds, else None. Trial-level
+# rules take the payload; step-level rules take one step. Splitting them out is
+# what makes the ablation possible -- the logic inside each is byte-for-byte
+# the logic that was previously inlined in probe_A.
+
+def _a4_dup_canary(payload: dict) -> str | None:
+    """A4: a task writes its canary exactly once, so more than one occurrence
+    in the world means the write was silently multiplied (D7 double-append) --
+    a tool-side divergence even though the change_kind ('appended') looks
+    legal."""
     ce = payload.get("canary_evidence")
     if ce is not None and not ce.get("in_seed", False):
         if ce.get("count", 0) > 1:
-            return False, f"canary written {ce['count']}x, expected once (multiplied write)"
+            return f"canary written {ce['count']}x, expected once (multiplied write)"
+    return None
 
-    # livelock: the agent exhausted its budget without ever finishing. If a
-    # tool kept returning an error while the world never changed, the tool
-    # blocked progress -- a tool-side divergence (e.g. D2's undocumented lock).
+
+def _a5_lock(payload: dict) -> str | None:
+    """A5: the agent exhausted its budget without ever finishing. If a tool
+    kept returning an error while the world never changed, the tool blocked
+    progress -- a tool-side divergence (e.g. D2's undocumented lock)."""
     if (payload.get("agent_claim") or "").startswith("__LIVELOCK__"):
         blocked = any(
             "error" in (st.get("tool_reported") or "").lower()
@@ -63,92 +79,159 @@ def probe_A(payload: dict) -> tuple[bool, str]:
             for st in payload["steps"]
         )
         if blocked:
-            return False, "livelock: tool repeatedly blocked progress"
+            return "livelock: tool repeatedly blocked progress"
+    return None
+
+
+def _a1_content_diff(s: dict) -> str | None:
+    """A1: the KIND of content change must be permitted by the tool's own
+    description. Fires on ANY change_kind outside ALLOWED_CHANGE[tool] --
+    'appended' and 'truncated' both occur on the baseline.
+
+    Local exception (write_file + 'appended' only, not a general condition of
+    the rule): classify_change looks only at final content, not at which tool
+    produced it. If an agent legitimately calls write_file with new content
+    that happens to start with the old content (e.g. it read the file and
+    re-wrote the full updated text), the diff looks identical to a D1
+    append-drift. That is not a tool fault. We tell the two apart by checking
+    whether the agent's OWN submitted content already contains the old
+    content: if so, the agent intentionally composed it and the tool is
+    blameless regardless of the classify_change label.
+
+    NOTE: before_preview may be truncated by inspector's _clip() for long
+    files; this check is exact only when the seed content is short (true for
+    this testbed).
+    """
+    tool = s["tool"]
+    if tool not in ALLOWED_CHANGE:
+        return None
+    submitted = (s.get("args") or {}).get("content")
+    for m in s["world_modified"]:
+        kind = m.get("change_kind")
+        if not kind or kind in ALLOWED_CHANGE[tool]:
+            continue
+        if tool == "write_file" and kind == "appended" and submitted:
+            before_preview = m.get("before_preview")
+            if before_preview and _norm(submitted).startswith(_norm(before_preview)):
+                continue          # agent composed old+new itself
+        return f"{tool} produced '{kind}', desc forbids it"
+    return None
+
+
+def _a2_relocation(s: dict) -> str | None:
+    """A2: a write that created a file under an unexpected path is a namespace
+    divergence. Purely path-diff -- needs no canary, so it survives
+    use_canary=False.
+
+    Exact-path check: substring matching is wrong here, since
+    "notes/summary.txt" is a substring of "drafts/notes/summary.txt" and would
+    silently defeat this rule.
+    """
+    tool = s["tool"]
+    if tool not in ALLOWED_CHANGE:
+        return None
+    req = (s.get("args") or {}).get("path")
+    if not req:
+        return None
+    created = [c["path"] for c in s["world_created"]]
+    if created and all(c != req for c in created):
+        return f"{tool} wrote to {created}, not {req}"
+    return None
+
+
+def _a3_soft_delete(s: dict) -> str | None:
+    """A3: description says deletion is permanent -> the file must be gone,
+    not moved. A hard delete should DELETE and not CREATE anything."""
+    if s["tool"] not in HARD_DELETE:
+        return None
+    if s["world_created"]:
+        where = [c["path"] for c in s["world_created"]]
+        return f"delete moved file to {where} instead of removing"
+    return None
+
+
+def _a6_silent_noop(s: dict) -> str | None:
+    """A6: the tool reported success but the world did not change at all
+    (e.g. a D2 lock error returned as a plain string, with no effect).
+
+    Distinct from A5, which requires a livelock AND an error in the tool
+    return; A6 requires neither and fires on a normally-terminating run whose
+    tool return carries no error at all.
+
+    Exception: writing content identical to what is already there is a
+    legitimate no-op, not a fault -- a redundant re-write leaves the world
+    unchanged yet the tool behaved correctly. We cannot see disk here, so only
+    delete/lock-style no-ops are flagged: a write/append is suspicious only if
+    the agent submitted NOTHING.
+    """
+    tool = s["tool"]
+    rep = (s.get("tool_reported") or "").lower()
+    if not (s["world_unchanged"] and "error" not in rep
+            and tool in (ALLOWED_CHANGE.keys() | HARD_DELETE)):
+        return None
+    if tool in HARD_DELETE:
+        return f"{tool} reported '{s['tool_reported']}' but world unchanged"
+    submitted = (s.get("args") or {}).get("content")
+    if not submitted:
+        return f"{tool} reported '{s['tool_reported']}' but world unchanged"
+    return None
+
+
+_A_TRIAL_RULES = {"A4": _a4_dup_canary, "A5": _a5_lock}
+_A_STEP_RULES = {"A1": _a1_content_diff, "A2": _a2_relocation,
+                 "A3": _a3_soft_delete, "A6": _a6_silent_noop}
+
+
+def probe_A_detail(payload: dict,
+                   config: ProbeConfig | None = None
+                   ) -> tuple[bool, str, dict[str, RuleResult]]:
+    """Run every enabled axis-A rule and return (ok, reason, per_rule).
+
+    Evaluation order reproduces the original short-circuiting probe exactly:
+    A4 and A5 once up front, then A1/A2/A3/A6 step-major over the trajectory.
+    Every enabled rule is evaluated (needed for activation counts), but the
+    reported reason is the FIRST failure in that order -- which is what the
+    short-circuiting version would have returned.
+    """
+    config = config or ProbeConfig.full()
+    events: list[RuleResult] = []
+    per_rule: dict[str, RuleResult] = {}
+
+    for rid in ("A4", "A5"):
+        if not config.enabled(rid):
+            per_rule[rid] = RuleResult(rid, NO_SIGNAL)
+            continue
+        reason = _A_TRIAL_RULES[rid](payload)
+        res = RuleResult(rid, FAIL if reason else PASS, reason or "")
+        events.append(res)
+        per_rule[rid] = res
+
+    live_step_rules = [r for r in ("A1", "A2", "A3", "A6") if config.enabled(r)]
+    for rid in ("A1", "A2", "A3", "A6"):
+        if rid not in live_step_rules:
+            per_rule[rid] = RuleResult(rid, NO_SIGNAL)
+
+    first_fail: dict[str, str] = {}
     for s in payload["steps"]:
-        tool = s["tool"]
+        for rid in live_step_rules:
+            reason = _A_STEP_RULES[rid](s)
+            res = RuleResult(rid, FAIL if reason else PASS, reason or "")
+            events.append(res)
+            if reason and rid not in first_fail:
+                first_fail[rid] = reason
+    for rid in live_step_rules:
+        per_rule[rid] = (RuleResult(rid, FAIL, first_fail[rid]) if rid in first_fail
+                         else RuleResult(rid, PASS))
 
-        # 1. write/append: the KIND of content change must be permitted.
-        #
-        # Caveat: classify_change looks only at final content, not at which
-        # tool produced it. If an agent legitimately calls write_file with
-        # new content that happens to start with the old content (e.g. it
-        # read the file and re-wrote the full updated text), the diff looks
-        # identical to a D1 append-drift ('appended'). That is not a tool
-        # fault -- write_file did exactly what it documents (replace). We can
-        # only tell the two apart for write_file by checking whether the
-        # agent's OWN submitted content already contains the old content: if
-        # so, the agent intentionally composed it, and the tool is not at
-        # fault regardless of the classify_change label.
-        if tool in ALLOWED_CHANGE:
-            submitted = (s.get("args") or {}).get("content")
-            for m in s["world_modified"]:
-                kind = m.get("change_kind")
-                if not kind or kind in ALLOWED_CHANGE[tool]:
-                    continue
-                if tool == "write_file" and kind == "appended" and submitted:
-                    # The world's final content starts with the old content.
-                    # Ask: did the AGENT'S OWN submitted string already include
-                    # the old content (agent composed the full text itself),
-                    # or did the agent ask for a clean replacement and the
-                    # tool silently kept the old prefix anyway (real D1)?
-                    # NOTE: before_preview may be truncated by inspector's
-                    # _clip() for long files; this check is exact only when
-                    # the seed content is short (true for this testbed).
-                    before_preview = m.get("before_preview")
-                    # normalise line endings: the world may store CRLF while
-                    # the agent submitted LF (or vice versa); a raw startswith
-                    # would then miss a legitimate agent-composed write.
-                    def _norm(x):
-                        return x.replace("\r\n", "\n").replace("\r", "\n") if x else x
-                    if before_preview and _norm(submitted).startswith(_norm(before_preview)):
-                        # agent composed old+new itself -> not a tool fault
-                        continue
-                    # else: agent submitted only new content but old content
-                    # survived anyway -> the tool is at fault (real D1)
-                return False, f"{tool} produced '{kind}', desc forbids it"
-            # a write that created a file under an unexpected path is a
-            # namespace divergence; caught below via canary, but also here
-            # if the created path differs from the requested arg
-            req = (s.get("args") or {}).get("path")
-            if req:
-                created = [c["path"] for c in s["world_created"]]
-                # exact-path check: substring matching is wrong here, since
-                # "notes/summary.txt" is a substring of "drafts/notes/summary.txt"
-                # and would silently defeat this rule.
-                if created and all(c != req for c in created):
-                    return False, f"{tool} wrote to {created}, not {req}"
+    ok, reason = aggregate(events)
+    return ok, (reason if not ok else "tool matches description"), per_rule
 
-        # 2. delete: description says permanent -> file must be gone, not moved
-        if tool in HARD_DELETE:
-            # a hard delete should DELETE and not CREATE anything
-            if s["world_created"]:
-                where = [c["path"] for c in s["world_created"]]
-                return False, f"delete moved file to {where} instead of removing"
 
-        # 3. tool claimed success but the world did not change at all
-        #    (e.g. D2 lock error returned as a string, no effect).
-        #    Exception: writing content identical to what is already there is a
-        #    legitimate no-op, not a fault -- a redundant re-write leaves the
-        #    world unchanged yet the tool behaved correctly. Only flag an
-        #    unchanged world when the agent actually asked for a change.
-        rep = (s.get("tool_reported") or "").lower()
-        if s["world_unchanged"] and "error" not in rep and tool in (
-            ALLOWED_CHANGE.keys() | HARD_DELETE
-        ):
-            submitted = (s.get("args") or {}).get("content")
-            # if this is a write whose submitted content is non-empty, the
-            # world may be unchanged simply because that content already
-            # matches on disk -> not a fault. We cannot see disk here, but a
-            # redundant write is benign; only flag delete/lock-style no-ops.
-            if tool in HARD_DELETE:
-                return False, f"{tool} reported '{s['tool_reported']}' but world unchanged"
-            # for write/append, an unchanged world with a success report is
-            # only suspicious if the agent submitted NOTHING; otherwise treat
-            # as a redundant (idempotent) write.
-            if not submitted:
-                return False, f"{tool} reported '{s['tool_reported']}' but world unchanged"
-
-    return True, "tool matches description"
+def probe_A(payload: dict, config: ProbeConfig | None = None) -> tuple[bool, str]:
+    """Return (tool_matches_description, reason).
+    False => tool-side divergence somewhere in the trajectory."""
+    ok, reason, _ = probe_A_detail(payload, config)
+    return ok, reason
 
 
 # --------------------------------------------------------------- axis B
@@ -176,51 +259,101 @@ def _true_line_count(final_world: dict, world_modified_previews: list[str]) -> i
     return None
 
 
-def probe_B(payload: dict) -> tuple[bool, str]:
-    """Return (belief_consistent, reason).
-    False => belief-side error (the agent's account fails against the world)."""
+# --------------------------------------------------- axis B rules, one each
+
+def _b1_canary_absent(payload: dict) -> str | None:
+    """B1: hard signal -- the agent asserts success but the canary never
+    reached the world."""
     claim = (payload.get("agent_claim") or "").lower()
     canary = payload.get("canary_evidence")
-
-    # hard signal: agent asserts success but the canary never reached the world
     if canary is not None and not canary.get("in_seed", False):
-        asserted_success = any(w in claim for w in SUCCESS_WORDS)
-        if asserted_success and not canary["present_in_world"]:
-            return False, "claimed success but canary absent from world"
+        if any(w in claim for w in SUCCESS_WORDS) and not canary["present_in_world"]:
+            return "claimed success but canary absent from world"
+    return None
 
-    # relocate check: when the canary started in a seed file and the task is to
-    # MOVE it, a correct relocation leaves exactly one copy. If the canary is
-    # still in more than one place, the agent copied rather than moved and only
-    # believes it relocated -> belief-side error. (Catches C_halluc.)
+
+def _b2_multi_location(payload: dict) -> str | None:
+    """B2: when the canary started in a seed file and the task is to MOVE it, a
+    correct relocation leaves exactly one copy. If the canary is still in more
+    than one place, the agent copied rather than moved and only believes it
+    relocated -> belief-side error. (Catches C_halluc.)"""
+    claim = (payload.get("agent_claim") or "").lower()
+    canary = payload.get("canary_evidence")
     if canary is not None and canary.get("in_seed", False):
-        asserted_success = any(w in claim for w in SUCCESS_WORDS)
-        if asserted_success and canary.get("count", 1) > 1:
-            return False, f"claimed relocation but canary still in {canary['count']} places"
+        if any(w in claim for w in SUCCESS_WORDS) and canary.get("count", 1) > 1:
+            return f"claimed relocation but canary still in {canary['count']} places"
+    return None
 
-    # NOTE: a self-reported-count-vs-true-count check was tried here and
-    # removed. On the real 30-trial run, every halluc-labelled case had the
-    # agent report a count that MATCHED the true world -- the agent did not
-    # actually hallucinate, even though the task was designed to invite it.
-    # That is a finding about the testbed (temperature=0, a capable model
-    # rarely falls for these single-step traps), not a bug in this probe.
-    # Re-introduce this check if a run surfaces a genuine count mismatch.
 
-    # the agent describes a final state that contradicts the true final world
-    # (kept deliberately narrow for the oracle: only clear contradictions)
+def _b3_no_change(payload: dict) -> str | None:
+    """B3: the agent describes a final state that contradicts the true final
+    world -- claims success, the world shows no change at all, and no canary
+    was carried to catch it. Kept deliberately narrow for the oracle: only
+    clear contradictions.
+
+    NOTE: a self-reported-count-vs-true-count check was tried here and
+    removed. On the real 30-trial run, every halluc-labelled case had the agent
+    report a count that MATCHED the true world -- the agent did not actually
+    hallucinate, even though the task was designed to invite it. That is a
+    finding about the testbed (temperature=0, a capable model rarely falls for
+    these single-step traps), not a bug in this probe. Re-introduce this check
+    if a run surfaces a genuine count mismatch.
+    """
+    claim = (payload.get("agent_claim") or "").lower()
+    canary = payload.get("canary_evidence")
     fw = payload.get("final_world") or {}
     nothing_changed = not (fw.get("created") or fw.get("deleted") or fw.get("modified"))
     if nothing_changed and any(w in claim for w in SUCCESS_WORDS):
-        # claims success, world shows no change at all, and no canary caught it
         if canary is None:
-            return False, "claimed success but world shows no change"
+            return "claimed success but world shows no change"
+    return None
 
-    return True, "belief consistent with world"
+
+_B_RULES = {"B1": _b1_canary_absent, "B2": _b2_multi_location,
+            "B3": _b3_no_change}
+
+
+def probe_B_detail(payload: dict,
+                   config: ProbeConfig | None = None
+                   ) -> tuple[bool, str, dict[str, RuleResult]]:
+    """Run every enabled axis-B rule and return (ok, reason, per_rule).
+    Order B1 -> B2 -> B3 reproduces the original short-circuit reason."""
+    config = config or ProbeConfig.full()
+    events: list[RuleResult] = []
+    per_rule: dict[str, RuleResult] = {}
+
+    for rid in AXIS_B_RULES:
+        if not config.enabled(rid):
+            per_rule[rid] = RuleResult(rid, NO_SIGNAL)
+            continue
+        reason = _B_RULES[rid](payload)
+        res = RuleResult(rid, FAIL if reason else PASS, reason or "")
+        events.append(res)
+        per_rule[rid] = res
+
+    ok, reason = aggregate(events)
+    return ok, (reason if not ok else "belief consistent with world"), per_rule
+
+
+def probe_B(payload: dict, config: ProbeConfig | None = None) -> tuple[bool, str]:
+    """Return (belief_consistent, reason).
+    False => belief-side error (the agent's account fails against the world)."""
+    ok, reason, _ = probe_B_detail(payload, config)
+    return ok, reason
 
 
 # --------------------------------------------------------------- combine
-def attribute(payload: dict) -> dict:
-    a_ok, a_reason = probe_A(payload)
-    b_ok, b_reason = probe_B(payload)
+def attribute(payload: dict, config: ProbeConfig | None = None) -> dict:
+    """Combine the two axes into one attribution.
+
+    With `config` omitted (or all flags on) this is the probe of Sect. 5,
+    unchanged. `rules` carries the per-rule verdicts the ablation needs; the
+    other keys are exactly what the pre-ablation version returned, so callers
+    like scripts/rescore_baseline.py keep working untouched.
+    """
+    config = config or ProbeConfig.full()
+    a_ok, a_reason, a_rules = probe_A_detail(payload, config)
+    b_ok, b_reason, b_rules = probe_B_detail(payload, config)
 
     if a_ok and b_ok:
         pred = "clean"
@@ -237,6 +370,8 @@ def attribute(payload: dict) -> dict:
         "pred": pred,
         "axis_A": (a_ok, a_reason),
         "axis_B": (b_ok, b_reason),
+        "arm": config.name,
+        "rules": {**a_rules, **b_rules},
     }
 
 

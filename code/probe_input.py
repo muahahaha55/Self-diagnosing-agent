@@ -26,14 +26,18 @@ swap agent_claim for the recorded belief; the probe structure is unchanged.
 """
 
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from probe_config import ProbeConfig
 
 
 def _descriptions(trial: dict) -> dict:
     return {s["name"]: s["description"] for s in trial.get("tool_specs", [])}
 
 
-def build_probe_payload(trial: dict) -> dict:
+def build_probe_payload(trial: dict, config: ProbeConfig | None = None) -> dict:
     desc = _descriptions(trial)
 
     steps = []
@@ -60,9 +64,15 @@ def build_probe_payload(trial: dict) -> dict:
     cum = trial.get("cumulative_effect") or {}
 
     # axis B hard evidence: did the intended write actually land?
+    #
+    # Ablation (Block 2.5, Tier 2): with use_canary=False the payload is built
+    # as if the testbed had never carried a canary at all. That is stronger
+    # than merely switching off A4/B1/B2 -- it also lets B3 (the no-canary
+    # fallback, which is gated on canary_evidence being absent) pick up
+    # whatever slack it can, which is precisely the question the arm asks.
     canary_evidence = None
     cr = trial.get("canary_result")
-    if cr is not None:
+    if cr is not None and (config is None or config.use_canary):
         canary_evidence = {
             "token": cr["canary"],
             "present_in_world": cr["present"],
@@ -90,9 +100,10 @@ def build_probe_payload(trial: dict) -> dict:
     }
 
 
-def build_all(trials_path: str | Path) -> list[dict]:
+def build_all(trials_path: str | Path,
+              config: ProbeConfig | None = None) -> list[dict]:
     trials = json.loads(Path(trials_path).read_text(encoding="utf-8"))
-    return [build_probe_payload(t) for t in trials]
+    return [build_probe_payload(t, config) for t in trials]
 
 
 def strip_gold(payload: dict) -> dict:
