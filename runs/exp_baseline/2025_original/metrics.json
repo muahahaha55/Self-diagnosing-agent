@@ -1,0 +1,181 @@
+{
+  "label_counts": {
+    "clean": 8,
+    "world_drift": 14,
+    "halluc": 8
+  },
+  "table_overall": {
+    "clean": {
+      "n": 8,
+      "P": 0.34782608695652173,
+      "R": 1.0,
+      "F1": 0.5161290322580645
+    },
+    "world_drift": {
+      "n": 14,
+      "P": 1.0,
+      "R": 0.42857142857142855,
+      "F1": 0.6
+    },
+    "halluc": {
+      "n": 8,
+      "P": 1.0,
+      "R": 0.125,
+      "F1": 0.2222222222222222
+    },
+    "accuracy": 0.5,
+    "n_correct": 15,
+    "n": 30
+  },
+  "table_overall_visible": {
+    "clean": {
+      "n": 8,
+      "P": 0.5333333333333333,
+      "R": 1.0,
+      "F1": 0.6956521739130436
+    },
+    "world_drift": {
+      "n": 6,
+      "P": 1.0,
+      "R": 1.0,
+      "F1": 1.0
+    },
+    "halluc": {
+      "n": 8,
+      "P": 1.0,
+      "R": 0.125,
+      "F1": 0.2222222222222222
+    },
+    "accuracy": 0.6818181818181818,
+    "n_correct": 15,
+    "n": 22
+  },
+  "table_verified_all": {
+    "clean": {
+      "n": 14,
+      "P": 0.6363636363636364,
+      "R": 1.0,
+      "F1": 0.7777777777777778
+    },
+    "world_drift": {
+      "n": 14,
+      "P": 1.0,
+      "R": 0.42857142857142855,
+      "F1": 0.6
+    },
+    "halluc": {
+      "n": 1,
+      "P": 1.0,
+      "R": 1.0,
+      "F1": 1.0
+    },
+    "accuracy": 0.7241379310344828,
+    "n_correct": 21,
+    "n": 29
+  },
+  "table_verified_visible": {
+    "clean": {
+      "n": 14,
+      "P": 1.0,
+      "R": 1.0,
+      "F1": 1.0
+    },
+    "world_drift": {
+      "n": 6,
+      "P": 1.0,
+      "R": 1.0,
+      "F1": 1.0
+    },
+    "halluc": {
+      "n": 1,
+      "P": 1.0,
+      "R": 1.0,
+      "F1": 1.0
+    },
+    "accuracy": 1.0,
+    "n_correct": 21,
+    "n": 21
+  },
+  "confusion": {
+    "clean": {
+      "clean": 8,
+      "world_drift": 0,
+      "halluc": 0
+    },
+    "world_drift": {
+      "clean": 8,
+      "world_drift": 6,
+      "halluc": 0
+    },
+    "halluc": {
+      "clean": 7,
+      "world_drift": 0,
+      "halluc": 1
+    }
+  },
+  "table_baselines": {
+    "outcome_only": [
+      0,
+      6
+    ],
+    "tool_report_only": [
+      0,
+      6
+    ],
+    "two_axis_probe": [
+      6,
+      6
+    ]
+  },
+  "table_verified": {
+    "design_all": {
+      "n": 30,
+      "acc": 0.5,
+      "drift_f1": 0.6,
+      "belief": [
+        1,
+        8
+      ]
+    },
+    "design_vis": {
+      "n": 22,
+      "acc": 0.6818181818181818,
+      "drift_f1": 1.0,
+      "belief": [
+        1,
+        8
+      ]
+    },
+    "verified_all": {
+      "n": 29,
+      "acc": 0.7241379310344828,
+      "drift_f1": 0.6,
+      "belief": [
+        1,
+        1
+      ]
+    },
+    "verified_vis": {
+      "n": 21,
+      "acc": 1.0,
+      "drift_f1": 1.0,
+      "belief": [
+        1,
+        1
+      ]
+    }
+  },
+  "visible_split": {
+    "n_world_drift": 14,
+    "n_visible_drift": 6,
+    "n_invisible_drift": 8,
+    "caught_visible_drift": 6
+  },
+  "belief_side": {
+    "n_designed_halluc": 8,
+    "n_relabelled_clean": 6,
+    "n_ambiguous": 1,
+    "n_genuine_halluc": 1,
+    "caught_genuine_halluc": 1
+  }
+}
