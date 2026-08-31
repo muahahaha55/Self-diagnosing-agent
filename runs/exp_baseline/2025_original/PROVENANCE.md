@@ -24,20 +24,52 @@ run is from August 2026.
 - `trials.json` — the raw run: 30 trial records, each with the full trajectory,
   recorded per-step and cumulative world effects, canary result, and tool specs.
   **The source of truth. Never edit.**
-- `summary.csv` — one row per trial, regenerated from `trials.json` by
-  `scripts/regen_all.py`: designed + post-hoc-verified label, probe prediction,
-  both axis outcomes and their reasons, canary evidence, visible/invisible flag.
+- `summary.csv` — one row per trial: designed + post-hoc-verified label, probe
+  prediction, both axis outcomes and their reasons, canary evidence,
+  visible/invisible flag. **Frozen provenance data** — it is the two-axis probe's
+  output on `trials.json` and is checked in alongside it. Regenerate it only by
+  re-running the probe: `python scripts/rescore_baseline.py` (see
+  *probe provenance* below).
 - `metrics.json` — every aggregate number the paper cites, regenerated from
-  `summary.csv`, grouped by the table / section it appears in.
+  `summary.csv` by `scripts/regen_all.py`, grouped by the table / section it
+  appears in.
 - `derived/table{2,3,4,5}.tex` — reference fragments for eyeballing the paper's
   hand-written tables against the recomputed numbers. Not `\input` by the paper.
 
 ## Reproduce (no GPU, no network)
 
 ```
-python scripts/regen_all.py            # rebuild summary.csv, metrics.json, fragments
-python scripts/verify_all_numbers.py   # check the paper against this run
+python scripts/regen_all.py            # rebuild metrics.json, table fragments, figures
+python scripts/verify_all_numbers.py   # check the paper against summary.csv
 ```
+
+Both read the checked-in `summary.csv` and need nothing from `code/`.
+
+## Probe provenance (known limitation)
+
+`summary.csv` was produced by the two-axis probe of paper Sect. 5:
+
+| File | sha256 (on disk, 2026-08-30) |
+|---|---|
+| `code/probe_input.py` | `7bb05e02582755fa1a91d0425bfcb83d1f2501e3a012e2918ac515ea09d0938c` |
+| `code/layer_4_oracle.py` | `b4e2cd54c107f3a68797bec6fdd131412efd63e6e64dd22d93ffe42e0495cd55` |
+
+**Git status of these two files at the time the baseline was frozen:**
+untracked, never committed — verified 2026-08-30 with `git status --porcelain code/`
+(both shown as `??`) and `git log --all --oneline -- code/probe_input.py`
+/ `-- code/layer_4_oracle.py` (both empty; not present in the first commit
+`944c22b` nor any other ref).
+
+They are deliberately **not** committed on branch `paper/block-0`, which is kept
+separate from the still-in-progress `code/`. The probe will be committed
+officially when Block 2 needs it. **When `code/` is committed, compare the sha256
+above** to confirm that is the same probe version that generated this baseline's
+`summary.csv`. If the sha256 differs, re-run `python scripts/rescore_baseline.py`
+and check that `summary.csv` is unchanged before trusting the new probe.
+
+`scripts/rescore_baseline.py` is the only script that imports these two files;
+`regen_all.py` and `verify_all_numbers.py` read the frozen `summary.csv` and do
+not.
 
 ## Re-running the agent (needs the backbone endpoint)
 

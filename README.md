@@ -21,9 +21,12 @@ runs/        frozen experiment outputs
                                (see its PROVENANCE.md — DO NOT MODIFY)
 
 scripts/     reproducibility (no GPU, no network)
-  common.py               load a run, score it, compute every paper number
-  regen_all.py            rebuild summary.csv / metrics.json / table fragments / figures
+  common.py               load a run's summary.csv, compute every paper number
+  regen_all.py            rebuild metrics.json / table fragments / figures from summary.csv
   verify_all_numbers.py   check every 0.XX and N/M in the paper against runs/
+  rescore_baseline.py     re-derive summary.csv by re-running the probe
+                          (needs code/ committed — see known limitation in
+                          runs/exp_baseline/2025_original/PROVENANCE.md)
 
 paper/figs/src/   figure generators (fig1_gen.py, fig2_gen.py — matplotlib;
                   crop_fig4_fig5.py — crop the author's raster fig4/fig5)

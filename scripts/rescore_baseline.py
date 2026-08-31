@@ -21,13 +21,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (BASELINE_RUN, INVISIBLE, ROOT, VERIFIED_LABEL,
                     load_trials, write_summary_csv)
 
+_PROBE_FILES = [ROOT / "code" / "probe_input.py",
+                ROOT / "code" / "layer_4_oracle.py"]
+_missing = [p for p in _PROBE_FILES if not p.exists()]
+if _missing:
+    sys.exit(
+        "rescore_baseline.py needs code/probe_input.py + code/layer_4_oracle.py, "
+        "which are not committed to the repo yet -- see PROVENANCE.md, section "
+        "'probe_provenance', to check the sha256 once these two files are "
+        "committed officially.\n"
+        "  missing: " + ", ".join(str(p.relative_to(ROOT)) for p in _missing))
+
 sys.path.insert(0, str(ROOT / "code"))
 try:
     from probe_input import build_all
     from layer_4_oracle import attribute
-except ModuleNotFoundError as e:
-    sys.exit(f"cannot import the probe ({e}). Expected code/probe_input.py and "
-             f"code/layer_4_oracle.py -- these are the probe from paper Sect. 5.")
+except ModuleNotFoundError as e:                       # e.g. an incomplete probe
+    sys.exit(
+        f"rescore_baseline.py needs code/probe_input.py + code/layer_4_oracle.py "
+        f"(the probe from paper Sect. 5), but importing it failed: {e}. "
+        f"See PROVENANCE.md, section 'probe_provenance'.")
 
 
 def rescore(run_dir: Path | str = BASELINE_RUN) -> list[dict]:
