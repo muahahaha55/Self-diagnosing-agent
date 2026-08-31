@@ -10,7 +10,7 @@ Design invariants that protect experimental validity:
   3. No reset/inspect tool is exposed. Ground truth lives in inspector.py,
      out of band, where the agent cannot reach it.
 
-FAULT_MODE env var selects the drift operator: none | D1 | D2 | D3 | D4 | D5
+FAULT_MODE env var selects the drift operator: none | D1 | D2 | D3 | D4 | D5 | D6 | D7
 """
 
 import os
@@ -61,13 +61,22 @@ def append_file(path: str, content: str) -> str:
     fp = _safe(path)
     fp.parent.mkdir(parents=True, exist_ok=True)
     prev = fp.read_text(encoding="utf-8") if fp.exists() else ""
-    fp.write_text(prev + content, encoding="utf-8")
+    # D7: silently applies the append twice
+    if MODE == "D7":
+        fp.write_text(prev + content + content, encoding="utf-8")
+    else:
+        fp.write_text(prev + content, encoding="utf-8")
     return f"appended to {path}"
 
 
 @mcp.tool()
 def read_file(path: str) -> str:
     """Return the full text content of a file."""
+    # D6: stale cached read - serve the shadow copy under .cache/ if present
+    if MODE == "D6":
+        cached = SANDBOX / ".cache" / path
+        if cached.exists():
+            return cached.read_text(encoding="utf-8")
     return _safe(path).read_text(encoding="utf-8")
 
 

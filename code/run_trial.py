@@ -1,18 +1,14 @@
 """
-Trial harness. This is the out-of-band oracle that surrounds each agent run.
+Trial harness, version 3.
 
-For every task:
-    reset(seed)              -> known clean world
-    snapshot()  == before
-    run_task(task, fault)    -> agent acts (never sees before/after)
-    snapshot()  == after
-    diff(before, after)      -> observed_effect (true world change)
+Adds over v2:
+  - canary_check per trial (when the task carries a canary): did the write
+    actually land, and where. This is the hard evidence Layer 4 axis B needs.
+  - a clean-reference step count per base, computed in a first pass over the
+    clean tasks, so a faulted run can be measured against how many steps the
+    same base needs when nothing is wrong.
 
-The trial record pairs the ground-truth label (clean / world_drift / halluc)
-with the true observed_effect. Layer 4 will later be fed this observed_effect
-as oracle input; its job is to recover the label. That is the go/no-go test.
-
-This file does NOT implement Layer 4. It only produces the labelled substrate.
+Still out of band: the agent sees none of this.
 """
 
 import sys
@@ -31,58 +27,101 @@ LOGDIR = ROOT / "trials"
 LOGDIR.mkdir(exist_ok=True)
 
 
-async def run_one(t: dict) -> dict:
+async def run_one(t: dict, ref_steps: dict) -> dict:
     inspector.reset(t.get("seed"))
-    before = inspector.snapshot()
+    start = inspector.snapshot()
+    prev = {"state": start}
 
-    trajectory = await run_task(t["task"], t["fault_mode"], verbose=False)
+    def on_step(record):
+        now = inspector.snapshot()
+        record["observed_effect"] = inspector.diff(prev["state"], now)
+        prev["state"] = now
 
-    after = inspector.snapshot()
-    observed = inspector.diff(before, after)
+    out = await run_task(t["task"], t["fault_mode"], on_step=on_step, verbose=False)
 
-    # attach the true observed_effect to the final tool step for reference
-    for rec in reversed(trajectory):
-        if rec.get("tool") is not None:
-            rec["observed_effect"] = observed
-            break
+    end = inspector.snapshot()
+    cumulative = inspector.diff(start, end)
 
-    final = next((r.get("final_answer") for r in trajectory
-                  if r.get("final_answer")), None)
+    steps = [r for r in out["trajectory"] if r.get("tool")]
+    first_effect_step = next(
+        (r["step"] for r in steps
+         if r["observed_effect"] and not inspector.is_empty_effect(r["observed_effect"])),
+        None,
+    )
+
+    # canary evidence (only for tasks that declare one)
+    canary_result = None
+    if "canary" in t:
+        canary_result = inspector.canary_check(t["canary"])
 
     return {
         "id": t["id"],
         "base": t["base"],
-        "label": t["label"],            # ground truth
+        "label": t["label"],
         "fault_mode": t["fault_mode"],
         "task": t["task"],
-        "observed_effect": observed,    # true world change, oracle view
-        "effect_empty": inspector.is_empty_effect(observed),
-        "final_answer": final,
-        "trajectory": trajectory,
+        "seed": t.get("seed"),
+        "canary": t.get("canary"),
+        "canary_in_seed": t.get("canary_in_seed", False),
+        "canary_result": canary_result,
+        "tool_specs": out["tool_specs"],
+        "cumulative_effect": cumulative,
+        "effect_empty": inspector.is_empty_effect(cumulative),
+        "n_tool_calls": len(steps),
+        "ref_clean_steps": ref_steps.get(t["base"]),
+        "first_effect_step": first_effect_step,
+        "final_answer": out["final_answer"],
+        "trajectory": out["trajectory"],
     }
 
 
 async def main(only=None):
     subset = [t for t in TASKS if (only is None or t["id"] in only)]
+
+    # pass 1: clean tasks first, to learn the reference step count per base
+    ref_steps = {}
+    clean = [t for t in subset if t["label"] == "clean"]
+    other = [t for t in subset if t["label"] != "clean"]
     results = []
-    for t in subset:
-        print(f"running {t['id']:12s} label={t['label']:12s} fault={t['fault_mode']}")
+
+    # One timestamped file for this run, written after EVERY trial so a dropped
+    # tunnel or a killed instance never loses the whole batch. Resuming is easy:
+    # pass the ids that are missing from the partial file.
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = LOGDIR / f"trials_{stamp}.json"
+
+    for t in clean + other:
+        print(f"running {t['id']:14s} label={t['label']:12s} fault={t['fault_mode']}")
         try:
-            r = await run_one(t)
+            r = await run_one(t, ref_steps)
         except Exception as e:
             print(f"  ERROR {type(e).__name__}: {e}")
             continue
+        # record reference from the FIRST clean seen for each base
+        if t["label"] == "clean" and t["base"] not in ref_steps:
+            ref_steps[t["base"]] = r["n_tool_calls"]
+            r["ref_clean_steps"] = r["n_tool_calls"]
         results.append(r)
-        eff = r["observed_effect"]
-        print(f"  effect: +{eff['created']} -{eff['deleted']} ~{eff['modified']}")
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = LOGDIR / f"trials_{stamp}.json"
-    out.write_text(json.dumps(results, indent=2, ensure_ascii=False),
-                   encoding="utf-8")
-    print(f"\n[log] {out}  ({len(results)} trials)")
+        # flush to disk immediately (atomic-ish: temp then replace)
+        tmp = out.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(out)
+
+        cr = r["canary_result"]
+        ctag = ""
+        if cr is not None:
+            ctag = f"  canary={'ok' if cr['present'] else 'MISSING'}"
+            if cr["present"] and r["canary_in_seed"] is False and cr["locations"]:
+                ctag += f"@{cr['locations'][0]}"
+        print(f"  steps={r['n_tool_calls']} ref={r['ref_clean_steps']}  "
+              f"{inspector.summarize(r['cumulative_effect'])}{ctag}  "
+              f"[saved {len(results)}/{len(subset)}]")
+
+    n_empty = sum(1 for r in results if r["effect_empty"])
+    print(f"\n[log] {out}  ({len(results)} trials, {n_empty} with no effect)")
 
 
 if __name__ == "__main__":
-    ids = sys.argv[1:] or None    # optionally pass specific task ids
+    ids = sys.argv[1:] or None
     asyncio.run(main(ids))

@@ -135,6 +135,42 @@ def diff(before: dict[str, dict], after: dict[str, dict]) -> dict:
     }
 
 
+def all_text() -> str:
+    """Concatenate the text of every file in the true world state.
+    Used to check whether a canary token actually made it to disk."""
+    parts = []
+    for fp in sorted(SANDBOX.rglob("*")):
+        if fp.is_file():
+            parts.append(fp.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(parts)
+
+
+def canary_check(canary: str) -> dict:
+    """Did the canary token reach the true world state?
+
+    present=True  -> the agent genuinely performed the write; the world holds
+                     the unguessable token.
+    present=False -> whatever the agent claimed, the intended write did not
+                     land. Combined with a success claim, this is a hard
+                     belief-side (axis B) signal for Layer 4.
+    locations lists the files that contain it, so a namespace drift (D4) shows
+    up as the canary being present but in the wrong path.
+    """
+    hits = []
+    total = 0
+    for fp in sorted(SANDBOX.rglob("*")):
+        if fp.is_file():
+            n = fp.read_text(encoding="utf-8", errors="replace").count(canary)
+            if n:
+                hits.append(fp.relative_to(SANDBOX).as_posix())
+                total += n
+    # count is the total number of occurrences across the world. A task writes
+    # its canary exactly once, so count > 1 means the write was silently
+    # multiplied (e.g. D7 double-append): a tool-side divergence.
+    return {"canary": canary, "present": bool(hits),
+            "locations": hits, "count": total}
+
+
 def is_empty_effect(d: dict) -> bool:
     return not (d["created"] or d["deleted"] or d["modified"])
 
