@@ -74,16 +74,52 @@ def extract_text(result) -> str:
     return "\n".join(getattr(b, "text", str(b)) for b in result.content)
 
 
+def _thinking_trace(msg) -> str | None:
+    """Return whatever reasoning trace this response carried, if any.
+
+    Two shapes exist in the wild: vLLM with a reasoning parser splits the
+    reasoning into `reasoning_content`, while without one the raw `<think>`
+    block stays inline in `content`. We look for both, because the failure we
+    are guarding against (see PROVENANCE.md, "Mandatory Block-2 checklist")
+    is exactly the case where enable_thinking=False was accepted and ignored.
+    """
+    rc = getattr(msg, "reasoning_content", None)
+    if rc:
+        return rc
+    content = msg.content or ""
+    if "<think>" in content:
+        return content[content.index("<think>"):]
+    return None
+
+
 async def run_task(task: str, fault_mode: str = "none",
-                   on_step=None, verbose: bool = True) -> dict:
+                   on_step=None, verbose: bool = True,
+                   model: str | None = None, temperature: float = 0.0,
+                   seed: int | None = None,
+                   enable_thinking: bool | None = None) -> dict:
     """Run one task under a given fault mode.
 
     on_step(record) is called right after each tool call returns, before the
     next LLM turn. The harness may mutate `record` in place, e.g. to attach
     the true observed_effect for that single step.
 
-    Returns {"trajectory": [...], "tool_specs": [...], "final_answer": str|None}
+    model/temperature/seed override the .env defaults so one process can sweep
+    the Block 2 matrix (3 backbones x {0.0, 0.7}; seeds replicated only at
+    0.7, since greedy decoding makes re-seeding a near-identical trajectory).
+
+    enable_thinking=None keeps the module default. The flag is only meaningful
+    for Qwen3.5 -- Llama-3.1 and Mistral-Nemo have no equivalent toggle and
+    vLLM silently ignores an unknown chat_template_kwargs key -- so the return
+    value carries `thinking_seen` for the caller to check rather than trusting
+    the flag.
+
+    Returns {"trajectory", "tool_specs", "final_answer", "run_config",
+             "thinking_seen", "thinking_sample"}
     """
+    model = model or MODEL
+    if enable_thinking is None:
+        enable_thinking = ENABLE_THINKING
+
     server_params = StdioServerParameters(
         command="python",
         args=[str(SERVER)],
@@ -93,6 +129,7 @@ async def run_task(task: str, fault_mode: str = "none",
 
     trajectory = []
     final_answer = None
+    thinking_sample = None
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -113,13 +150,27 @@ async def run_task(task: str, fault_mode: str = "none",
             ]
 
             for step in range(MAX_STEPS):
-                resp = client.chat.completions.create(
-                    model=MODEL, messages=messages, tools=tools,
-                    temperature=0.0, parallel_tool_calls=False,
+                kwargs = dict(
+                    model=model, messages=messages, tools=tools,
+                    temperature=temperature, parallel_tool_calls=False,
                     extra_body={"chat_template_kwargs":
-                                {"enable_thinking": ENABLE_THINKING}},
+                                {"enable_thinking": enable_thinking}},
                 )
+                # only send `seed` when one was asked for: at temperature 0 the
+                # decode is greedy and the field is noise in the log.
+                if seed is not None:
+                    kwargs["seed"] = seed
+                resp = client.chat.completions.create(**kwargs)
                 msg = resp.choices[0].message
+
+                # guard: enable_thinking=False has been silently ignored on
+                # some vLLM builds (parameter-name drift between the chat
+                # template and the reasoning parser). Record what we actually
+                # got so the caller can refuse to trust the run.
+                if thinking_sample is None:
+                    trace = _thinking_trace(msg)
+                    if trace:
+                        thinking_sample = trace[:400]
 
                 if not msg.tool_calls:
                     final_answer = msg.content
@@ -179,6 +230,16 @@ async def run_task(task: str, fault_mode: str = "none",
         "trajectory": trajectory,
         "tool_specs": tool_specs,
         "final_answer": final_answer,
+        "run_config": {
+            "model": model,
+            "temperature": temperature,
+            "seed": seed,
+            "enable_thinking": enable_thinking,
+            "max_steps": MAX_STEPS,
+        },
+        # True => the backbone emitted a reasoning trace despite the flag.
+        "thinking_seen": thinking_sample is not None,
+        "thinking_sample": thinking_sample,
     }
 
 
