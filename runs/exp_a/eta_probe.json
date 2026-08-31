@@ -1,9 +1,7 @@
 {
-  "cell": "Qwen_Qwen3.5-9B_T0.0_sNone",
-  "wall_seconds": 7.6,
+  "cell": "meta-llama_Llama-3.1-8B-Instruct_T0.0_sNone",
+  "wall_seconds": 1.6,
   "per_trial_seconds": {
-    "A_clean": 2.1,
-    "A_drift_D1": 1.7,
-    "A_halluc": 3.8
+    "A_clean": 1.6
   }
 }
