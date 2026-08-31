@@ -3,3 +3,16 @@ __pycache__/
 .env
 sandbox/*
 !sandbox/.gitkeep
+
+# LaTeX build artifacts
+paper/build/
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+
+# Python cache from figs/src generators
+paper/figs/src/__pycache__/

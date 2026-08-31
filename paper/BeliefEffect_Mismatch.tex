@@ -1,0 +1,350 @@
+\documentclass[runningheads]{llncs}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+% Fonts: Times-like text + matching math, the LNCS camera-ready convention.
+\usepackage{amsmath}
+\usepackage{newtxtext}
+\usepackage[varvw]{newtxmath}
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{siunitx}
+\usepackage[table]{xcolor}
+\usepackage{caption}
+\usepackage[protrusion=true,expansion=true]{microtype}
+\usepackage{hyperref}
+\hypersetup{hidelinks,
+  pdftitle={Belief-Effect Mismatch: Attributing Tool-Side and Belief-Side Failures in Tool-Using LLM Agents},
+  pdfauthor={Viet Phuong Nguyen},
+  pdfsubject={Failure attribution in tool-using LLM agents},
+  pdfkeywords={failure attribution, tool-using agents, MCP, controlled evaluation}}
+
+\captionsetup{font=small,labelfont=bf,labelsep=period,skip=6pt}
+
+% Keep run-in headings and their first line together.
+\clubpenalty=9000
+\widowpenalty=9000
+\displaywidowpenalty=9000
+
+% Numeric table columns: fixed two-decimal, decimal-point aligned.
+\sisetup{table-format=1.2, table-number-alignment=center,
+  detect-weight=true, detect-family=true, mode=text}
+
+% Uniform row height across every table (booktabs + a little breathing room).
+\renewcommand{\arraystretch}{1.04}
+
+% Semantic table shading, shared across every table:
+%   okgreen  -- a correct outcome, or the row for our method
+%   missred  -- a miss (a fault the probe read as clean)
+\definecolor{okgreen}{HTML}{E8F5E9}
+\definecolor{missred}{HTML}{FFEBEE}
+
+\begin{document}
+
+\title{Belief--Effect Mismatch: Attributing Tool-Side and Belief-Side Failures in Tool-Using LLM Agents}
+\titlerunning{Belief--Effect Mismatch}
+\author{Viet Phuong Nguyen}
+\authorrunning{V.\,P. Nguyen}
+\institute{Placeholder Institute, Vietnam \\
+\email{24022431@vnu.edu.vn}}
+
+\maketitle
+
+\begin{abstract}
+An LLM agent acting through tools can fail because a tool broke its own contract or because the agent formed a wrong belief about what it did, and the two look identical in the agent's final report---yet they demand opposite recoveries. We study whether the two causes can be told apart when the true cause is known. We build a controlled testbed over an MCP filesystem server in which every trial carries a ground-truth cause: \textsf{clean}, a tool-side \textsf{world\_drift} injected by operators that silently violate a tool's unchanged description, or a belief-side \textsf{halluc}. Matched pairs hold the instruction and initial world fixed so the injected cause is the only difference, and an out-of-band oracle supplies a cause label the agent never sees. On this testbed we evaluate a training-free probe that attributes failure along two orthogonal binary axes---whether each tool honoured its description, and whether the agent's account survives contact with the true world---combined into a $2\times2$ decision whose fourth cell flags cases an agent should defer to a human. On the trials where a fault leaves any trace in the effect, the tool-side axis recovers the fault exactly (six of six visible drifts), with perfect precision on both fault classes; every error is a missed fault read as \textsf{clean}, never one cause confused for the other, and two attribution-free baselines recover none of these drifts by construction. We further isolate a class of \emph{invisible drift} that no effect-based probe could attribute, and re-score under a post-hoc verified ground truth that replaces design-time labels with what actually occurred: on the observable, verified trials the probe attributes every one correctly, though the testbed yields a single genuine belief-error trial, so belief-side attribution is shown as an existence proof rather than a rate. Throughout, the probe is a deterministic oracle measuring what the two-axis formulation can recover from perfect evidence---an upper bound---not an agent introspecting on itself.
+\keywords{failure attribution \and tool-using agents \and MCP \and controlled evaluation.}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+An LLM agent acting through tools can fail for two very different reasons that look identical from the outside. It may fail because a tool did not do what its description promised---a write that silently appended instead of replacing, a delete that quietly moved a file to a trash folder. Or it may fail because the agent itself formed a wrong belief about what it did---reporting a file moved when it was only copied, a count that was never checked, a write that never happened. In both cases the task is left incomplete and the agent's report may sound equally confident, yet the right response is opposite: a broken tool contract calls for re-reading the world and replanning; a mistaken belief calls for the agent to re-examine its own reasoning. An agent that cannot tell these apart cannot choose the right recovery.
+
+Current evaluation makes this hard to study. Tool-use and MCP benchmarks report whether a task succeeded, not why it failed, so a tool-side fault and a belief-side fault collapse into the same failed score. Recent diagnostic work localizes failures within a trajectory, but post hoc, over broad taxonomies, and against ground truth annotated by hand. None of these lets us ask the sharp question we care about: when a failure could have come from either the tool or the agent's belief, and the true cause is known, can it be attributed correctly?
+
+To ask that question we need trials whose cause is fixed by construction. We build a small, controlled testbed over a single MCP filesystem server in which every trial carries a ground-truth cause---\textsf{clean}, a tool-side \textsf{world\_drift}, or a belief-side \textsf{halluc}---established by how the trial is made rather than judged afterward. Tool-side faults are injected by drift operators that leave a tool's description untouched while silently changing its behaviour, modelling a phenomenon measured in roughly one in eight real MCP servers. Matched pairs hold the instruction and the initial world fixed across conditions, so that the injected cause is the only thing that differs and cannot be read off surface text. An out-of-band oracle observes the true world state, giving each trial a cause label the agent never sees.
+
+On this testbed we test a training-free attribution probe that splits the diagnosis into two orthogonal binary axes. Axis A checks whether each tool honoured its description; a failure here is tool-side. Axis B checks whether the agent's own account survives contact with the true world; a failure here is belief-side. The two answers combine into a $2\times2$ decision whose fourth cell---both axes failing---names exactly the case where the agent should stop and ask a human rather than attempt a repair it cannot ground.
+
+\smallskip\noindent\textbf{Our contributions are:} \textbf{(C1)}~A controlled testbed of 30 matched-pair trials over an MCP filesystem server, in which every failure carries a ground-truth cause label established by construction rather than annotation. \textbf{(C2)}~Evidence that tool-side drift and belief-side hallucination are indistinguishable from the agent's final report alone, motivating attribution from observed effects. \textbf{(C3)}~A two-axis attribution probe that, on trials where a fault leaves any trace in the effect, recovers the tool-side fault source exactly (all six visible drifts, $\mathrm{F1}{=}1.00$) with perfect precision on both fault classes; two attribution-free baselines recover none by construction. \textbf{(C4)}~Identification of a class of \emph{invisible drift}---faults that leave no trace in the effect and are unattributable in principle, even to an oracle---isolated rather than left to dilute the reported metrics. \textbf{(C5)}~A post-hoc verification protocol replacing each design-time label with the fault that actually occurred at run time; under it, the probe attributes every observable, verified trial correctly, while exposing that the testbed produced only one genuine belief-error trial.
+
+We are explicit about scope. This is a first, controlled step: a single agent backbone, a single tool domain, thirty trials. We do not claim that the agent introspects on itself, nor that attribution improves recovery; the probe is a deterministic oracle that measures what the two-axis formulation can recover when the evidence is perfect. We report, as a finding rather than a footnote, that design-time \textsf{halluc} labels do not guarantee a hallucination occurs at run time, and we re-score against a verified ground truth to show what the labels alone obscure. The testbed and probe are built to make these boundaries visible, not to hide them.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsubsection{Tool-use and MCP benchmarks.}
+A large and fast-growing body of work evaluates how well agents use tools. Benchmarks such as $\tau$-bench and its successors, along with MCP-specific suites like MCP-Atlas~\cite{mcpatlas} and MCPAgentBench~\cite{mcpagentbench}, measure whether an agent completes a task, often over realistic multi-step workflows and, in the MCP case, over real or simulated servers. These benchmarks are indispensable for ranking systems, but they share a structural limitation for our purposes: they report a single end-to-end success or failure signal and do not localize where in the agent's process a failure originates~\cite{agentprop}. A task marked failed could have failed because a tool misbehaved or because the agent formed a wrong belief, and the benchmark score cannot tell the two apart. Our testbed is built precisely to make that distinction, and so is complementary to these suites rather than a competitor to them: it trades their scale and realism for controlled, cause-labelled trials.
+
+\subsubsection{Failure attribution and trajectory diagnosis.}
+A more recent line of work moves from scoring outcomes to diagnosing failures. Closest to ours is AgentRx~\cite{agentrx}, which localizes a trajectory's critical failure step and classifies it under a nine-category, cross-domain taxonomy, using an LLM-based judge over an auditable log of constraint violations; related efforts diagnose failures in agentic coding systems~\cite{trajaudit} and survey the fragmented state of agent evaluation~\cite{agentatlas}. Our work shares the attribution goal but differs in three ways. AgentRx operates post hoc on trajectories already known to have failed; our probe runs online, predicting an effect before each action and checking it against the world immediately after. AgentRx's ground truth comes from manual annotation against a broad taxonomy; ours comes from controlled injection, so every trial's cause is fixed by construction rather than judged after the fact. And we deliberately restrict attribution to two orthogonal binary axes---each anchored to a concrete, checkable signal---rather than a multi-way taxonomy that requires a judge. The two designs answer different questions: what broad class of error occurred in a real failed run, versus whether two specific and easily-confused causes can be told apart when the ground truth is known.
+
+\subsubsection{Description-code inconsistency in MCP servers.}
+Our tool-side fault model is not hypothetical. Two independent large-scale studies establish that MCP tools frequently diverge from their own descriptions. A static-analysis study of 10{,}240 real-world servers finds that roughly 13\% exhibit substantial description--implementation mismatches~\cite{mcpmislead}, and a second measurement over 19{,}200 description--code pairs from 2{,}214 servers reports a comparable 9.93\% inconsistency rate under a different detection method~\cite{mcpincon}. These studies frame the phenomenon primarily as a security surface---undocumented privileged operations and hidden side effects---and they measure its prevalence rather than an agent's ability to notice it at run time. We take the same phenomenon as the basis for our \textsf{world\_drift} operators, and ask the complementary question they do not: when a tool silently violates its description, can the resulting failure be attributed to the tool rather than to the agent?
+
+\subsubsection{Belief and confidence in agents.} Our belief-side axis relates to work on whether agents represent their own uncertainty and know when to call a tool. We do not probe internal representations; our signal is behavioural, read from whether the agent's stated account survives contact with the true world. Making it introspective---eliciting a structured belief and confidence before acting---is future work.
+
+\section{Problem Formalization}
+\label{sec:problem}
+
+We consider an agent carrying out a task by issuing a sequence of tool calls to an MCP server. At each step the agent holds a belief about what a call will do, issues the call, and observes a report returned by the tool. The call also produces a real change in the world---the filesystem state---which the report describes but does not constitute. A failure is a mismatch between what the task required and what the world ultimately contains. Our question is not whether such a mismatch occurred, but what produced it.
+
+\subsubsection{Two sources of failure.}
+We separate the causes of a step-level failure into two sources that are, in principle, independent.
+
+The first is \emph{tool-side}: the tool's behaviour diverges from its own description. The description is a contract---this call replaces the file, this call permanently deletes---and the tool violates it silently, doing something the description does not license. This source is aleatoric from the agent's perspective: nothing in the information available to the agent before the call reveals the divergence, because the description, which is all the agent has, is exactly what the tool is failing to honour. We label a failure from this source \textsf{world\_drift}.
+
+The second is \emph{belief-side}: the agent's belief about the effect of its own actions is wrong, even though every tool behaved as described. The agent may believe it wrote a file it never wrote, moved a file it only copied, or produced a result it never produced. This source is epistemic: it lies in the agent's model of the world, not in the world's behaviour, and better reasoning over the same evidence could in principle have avoided it. We label a failure from this source \textsf{halluc}.
+
+\subsubsection{Attribution as a two-axis decision.}
+Because the two sources are independent, a principled attribution does not choose one label from a flat list; it answers two separate yes/no questions. Axis A asks whether each tool honoured its description. Axis B asks whether the agent's account of what it achieved survives comparison with the true world. Writing $A$ for ``the tool matched its description'' and $B$ for ``the belief matched the world,'' the two answers define four outcomes: $(A,B)$ \textsf{clean}; $(\neg A, B)$ tool-side, \textsf{world\_drift}; $(A, \neg B)$ belief-side, \textsf{halluc}; and $(\neg A, \neg B)$ \emph{both}, where tool and belief have each failed. The final cell is not redundant: it names the situation in which the agent cannot safely repair on its own, and the appropriate response is to stop and defer to a human rather than act on a compromised understanding. A scheme that collapsed attribution into a single label could not express this cell, which is the central reason we keep the axes separate.
+
+\section{Testbed Design}
+\label{sec:testbed}
+
+Existing agent benchmarks record whether a task succeeded, but not why it failed. That is enough to rank systems and insufficient to study attribution: to ask whether a divergent tool can be separated from the agent's own mistaken belief, we need trials whose cause is fixed by construction rather than guessed after the fact. Our testbed supplies this. It contains 30 trials over a single Model Context Protocol (MCP) filesystem server, each carrying a ground-truth cause label---8~\textsf{clean}, 14~\textsf{world\_drift}, and 8~\textsf{halluc}. Fig.~\ref{fig:flow} shows the end-to-end flow of a single trial, from a matched-pair task through the agent and tools into the true world, which an out-of-band oracle reads to drive the two-axis attribution.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figs/fig1_flow.png}
+\caption{Execution flow of a single trial: a matched-pair task runs through the agent and the (possibly drifted) tools into the true world, which an out-of-band oracle reads to drive the two-axis attribution into a $2\times2$ decision. The agent sees only descriptions and reports; ground truth lives entirely in the oracle.}
+\label{fig:flow}
+\end{figure}
+
+The server exposes six tools: \texttt{write\_file}, \texttt{append\_file}, \texttt{read\_file}, \texttt{list\_dir}, \texttt{delete\_file}, and \texttt{acquire\_lock}. The same six tools, carrying the same natural-language descriptions, are present in every condition. Nothing the agent can observe about the interface distinguishes a clean trial from a faulted one---a property we rely on to keep each injected cause hidden from the agent under test.
+
+\subsection{Construction Methodology}
+
+The testbed follows a deliberate construction process: producing trials whose cause is known with certainty while remaining, from the agent's point of view, indistinguishable from an ordinary tool-use task. We describe that process here because how a testbed is built bounds how much its results can be trusted.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figs/fig2_matched.png}
+\caption{Matched-pairs construction (left) and the base--operator grid (right): a matched-pairs group shares an instruction and seed so only the injected fault differs (\textsf{A\_drift\_D2} is simply a second \textsf{world\_drift} example, not a \emph{both} case), and no base implies a fixed operator.}
+\label{fig:matched}
+\end{figure}
+
+\smallskip\noindent\textbf{\emph{A documented, unattributed phenomenon.}} Description--code inconsistency in MCP servers is real and measured at scale: a static-analysis study of 10{,}240 servers reports $\approx$13\% substantial mismatches~\cite{mcpmislead}, and an independent measurement over 19{,}200 pairs from 2{,}214 servers reports 9.93\% under a different detection method~\cite{mcpincon}. No existing benchmark isolates this tool-side cause from agent-side belief error as a distinct, attributable category. The testbed exists to close that gap, not to be a general-purpose evaluation.
+
+\smallskip\noindent\textbf{\emph{Base selection and operator design.}} We started from seven short filesystem workflows and asked, for each, where a tool could plausibly diverge from its description without being contrived. A workflow qualifies as a base only if some step has a documented contract specific enough to be silently violated. Each of the seven operators (Table~\ref{tab:ops}) was designed against two constraints: (i)~leave the tool's description exactly as written; (ii)~alter exactly one aspect of behaviour, so a failure traces to a single nameable cause. Each operator also has a \textsf{halluc} counterpart on the same base, so drift and halluc trials share surface characteristics---length, tool sequence, phrasing---and the two causes cannot be told apart by anything other than the effect itself.
+
+\smallskip\noindent\textbf{\emph{Verification, and an error the process caught.}} The canary mechanism and oracle inspector, which carry the full weight of ground truth, were exercised with synthetic hand-constructed world states before any live trial: the canary check against present-at-expected-path, absent, and present-at-wrong-path cases; the content-level classifier against synthetic before/after pairs triggering every category (replaced, appended, prepended, truncated, wrapped, filled from empty, emptied)---the distinction that separates a D1 drift from an ordinary overwrite. Cross-checking every task's declared operator against the server's implemented operators caught, before any GPU time, that two operators (D6, stale cached read; D7, duplicated write) were initially specified in tasks but not yet implemented, so their trials would have silently run as clean. We report this because a construction methodology whose failure modes are never visible is not one we would trust either.
+
+\subsection{Tasks, Matched Pairs, and Drift Operators}
+
+The 30 tasks are built from seven bases: A overwrites a file, B deletes a file and counts what remains, C creates a file under a specific directory, D writes under a precondition the documentation does not mention, E lists a directory, F follows a configuration file to a target and writes there, and G appends to a log with existing content. Bases differ in what makes them fragile---A depends on replacement semantics, C on where a write lands, F on reading the right target first---so different drift operators have somewhere to bite. Each base appears under several conditions sharing the same instruction and seed filesystem; only the injected fault differs. We avoid a one-to-one base--operator mapping: base~B is exercised by three operators and single operators recur across bases, so a model cannot fall back on a ``base~B means operator~X'' shortcut.
+
+A \textsf{world\_drift} is created by a drift operator: a tool whose description is untouched but whose behaviour quietly departs from it. The seven operators (Table~\ref{tab:ops}) span the ways a tool's behaviour can silently diverge from a fixed description: appending where the description promises replacement (D1); imposing an undocumented precondition such as locking (D2); altering a return format (D3); relocating a write into a hidden namespace, so \texttt{notes/summary.txt} actually lands at \texttt{drafts/notes/summary.txt} (D4); soft-deleting to a trash path instead of removing (D5); serving stale cached reads (D6); and applying an append twice (D7).
+
+\begin{table}[t]
+\centering
+\caption{The seven drift operators. In every case the tool's description is left unchanged; only its behaviour diverges from that description.}
+\label{tab:ops}
+\begin{tabularx}{0.86\linewidth}{@{}l@{\hspace{2.2em}}X@{}}
+\toprule
+\textbf{Operator} & \textbf{Divergence from the tool's own (unchanged) description} \\
+\midrule
+D1 & appends instead of replacing \\
+D2 & imposes an undocumented lock precondition \\
+D3 & alters the format of a returned listing \\
+D4 & silently relocates a write into a hidden namespace \\
+D5 & soft-deletes to a trash path instead of removing \\
+D6 & serves a stale cached copy on read \\
+D7 & applies an append twice \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Canary Tokens and the Oracle Inspector}
+
+A fluent model can describe an action convincingly enough to pass a shallow check without the action having occurred. To close this gap, every task whose workflow includes a write step---bases A, C, F, and G---embeds a fixed six-hex canary token in the content the agent must write. A task might ask the agent to write \texttt{"Q3 revenue: 160 [2d232f]"}, where \texttt{2d232f} is the canary. Because the token is unguessable, the true world state contains it only if the agent actually performed the write; success claims made without the canary landing are, by construction, belief failures with no need to parse free-form text. The number of occurrences carries further information: a task writes its canary exactly once, so a count above one means the write was multiplied or the original left in place---which is how a relocation the agent only believes it performed (copy rather than move) is caught. Canaries live only in content the agent must produce, never in seeds; they are fixed per base so matched pairs share a token and runs reproduce. Read- and count-oriented bases (B, E) carry no canary; there, a wrong count is itself the belief-side signal.
+
+Ground truth is delivered by an out-of-band inspector that observes the true filesystem directly and is never exposed to the agent. It snapshots the world before and after each step and computes a two-tier diff: path-level (which files were created, deleted, modified) and content-level (how each modified file changed: replaced, appended, prepended, truncated, wrapped, filled from empty, emptied). The second tier is what makes drift detectable at all: a hash-only diff would collapse an append and an overwrite into one ``modified'' signal, which is precisely the difference between a D1 drift and a correct replacing write. Alongside the diff, the inspector reports whether a given canary reached the world, at which paths, and how many times---separating a namespace drift (wrong location) from a missing write (belief failure) by location alone.
+
+\section{The Two-Axis Attribution Probe}
+\label{sec:probe}
+
+Given a trajectory and the world state it produced, the probe must decide whether a failure came from the tool or from the agent's belief. Rather than ask that question directly---which forces a single fuzzy judgement over a continuum of failure modes---we split it into two checks that can each be answered from concrete evidence, and combine their outcomes.
+
+Axis A asks whether each tool did what its own description says. This is tool-side, and a failure on this axis corresponds to \textsf{world\_drift}. Axis B asks whether the agent's own account survives contact with the true world. This is belief-side, and a failure here corresponds to \textsf{halluc}. The axes are independent: a trial can fail neither, either, or both.
+
+In this work each axis is realised as a deterministic rule over the oracle's evidence---the observed effect, the tool descriptions, and the canary report. We use a rule-based oracle rather than a model-based judge on purpose: it establishes what the two-axis formulation can recover when the evidence is perfect, before any question of whether a model can approximate that judgement.
+
+\paragraph{Axis A: does the tool match its description?}
+Axis A walks the trajectory step by step and checks the observed effect of each tool call against a small contract derived from that tool's description. For a write, the description promises replacement, so the content-level change must be ``replaced'' or ``filled from empty''; an ``appended'' change signals a D1 drift, unless the agent's own submitted content already contained the prior text (in which case the agent composed the combined text itself and the tool is not at fault). For an append, the permitted change is ``appended''. A write whose created path differs from the path the agent requested is a relocation, flagging D4. For a deletion, the description promises permanent removal, so a delete that creates a ``leftover'' copy in a trash path signals a D5 soft-delete. Two further signals are checked before the per-step walk: if the canary appears in the world more than once, a single write was multiplied, flagging D7; and if the agent never terminated---exhausting its step budget while a tool repeatedly returned an error and the world never changed---the tool blocked progress, the signature of a D2 lock. In all cases axis~A fails, and the trial is attributed tool-side.
+
+\paragraph{Axis B: does the belief survive the world?}
+Axis B compares the agent's closing account against the true final world. It relies on the canary as hard evidence wherever a task carries one. If the agent claims success but the canary never reached the world, the intended write did not land and the belief has failed against reality. If a task requires moving a file---so its canary begins in a seed and should end in exactly one place---and the canary instead survives in more than one location, the agent copied rather than moved and only believes it relocated the file. Absent a canary, the probe falls back to a narrow check: a success claim over a world that shows no change at all is treated as a belief failure. These checks are deliberately conservative, so that a flag on axis~B is reliable even though many belief errors will pass unflagged.
+
+\paragraph{Combining the axes.}
+The two outcomes map onto a $2\times2$ table. When both axes pass, the trial is \textsf{clean}. When axis~A fails and axis~B passes, the fault is tool-side: \textsf{world\_drift}. When axis~A passes and axis~B fails, it is belief-side: \textsf{halluc}. When both fail, the evidence implicates tool and belief at once; the agent cannot safely repair on its own, and the appropriate action is to halt and defer to a human rather than guess. This last cell is the reason for keeping the axes separate: a scheme that emitted a single label could not express ``both, so stop.''
+
+\section{Results}
+\label{sec:results}
+
+We run all 30 trials through a single agent backbone (Qwen3.5-9B, temperature 0, reasoning disabled) and pass each resulting trajectory to the oracle attribution probe of Section~\ref{sec:probe}. On every trial the probe sees the true observed effect, the tool descriptions, and the canary evidence, but never the ground-truth label. It returns one of three decisions---\textsf{clean}, \textsf{world\_drift}, or \textsf{halluc}---which we compare against the label. We report results in four passes: against the design-time labels over all 30 trials (Section~\ref{sec:overall}); against two attribution-free baselines (Section~\ref{sec:baselines-sec}); after separating the drifts that leave a trace from those that cannot (Sections~\ref{sec:visible}--\ref{sec:belief}); and finally against a post-hoc verified ground truth that replaces each design-time label with what actually occurred at run time (Section~\ref{sec:verified-sec}).
+
+\subsection{Overall Attribution}
+\label{sec:overall}
+
+Table~\ref{tab:overall} reports per-class precision, recall, and F1 across all 30 trials; overall accuracy is $0.50$ (15 of 30 trials attributed correctly). We read this table as three separate claims rather than a single headline number.
+
+\smallskip\noindent\textbf{\emph{Primary result --- observable tool-side faults are recovered.}} Every fault the probe commits to is correct: both fault classes reach a precision of $1.00$. On the drift trials whose fault reaches the world (Section~\ref{sec:visible}), the tool-side axis recovers the source exactly. The probe is conservative---it names a fault source only when the evidence forces it.
+
+\smallskip\noindent\textbf{\emph{Secondary diagnostic property --- the two axes never cross-confuse.}} The confusion matrix (Table~\ref{tab:conf}) shows that every error lies in the \textsf{clean} column: a missed fault is always read as clean, never as the wrong kind of fault. No drift is ever attributed to belief, and no belief error to the tool. When the probe fails, it fails by staying silent, not by pointing at the wrong source---the property the two-axis decomposition was designed to give.
+
+\smallskip\noindent\textbf{\emph{Limitation --- conservatism costs recall.}} That same conservatism suppresses recall, $0.43$ for drift and $0.12$ for hallucination over the design-time labels. The rest of this section accounts for that silence, and shows that most of it is a property of the trials rather than a shortfall of the probe.
+
+\begin{table}[t]
+\centering
+\caption{Per-class attribution over all 30 trials. Both fault classes reach perfect precision; the recall gap is the subject of Sections~\ref{sec:visible}--\ref{sec:verified-sec}. Overall accuracy is $0.50$.}
+\label{tab:overall}
+\begin{tabular}{@{}l @{\hspace{1.8em}} S[table-format=2.0] @{\hspace{1.6em}} S @{\hspace{1.6em}} S @{\hspace{1.6em}} S @{}}
+\toprule
+\textbf{Class} & {\textbf{n}} & {\textbf{Precision}} & {\textbf{Recall}} & {\textbf{F1}} \\
+\midrule
+\textsf{clean}        & 8  & 0.35 & 1.00 & 0.52 \\
+\textsf{world\_drift} & 14 & 1.00 & 0.43 & 0.60 \\
+\textsf{halluc}       & 8  & 1.00 & 0.12 & 0.22 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Confusion matrix. Rows are ground truth, columns are the probe's prediction. The off-diagonal mass sits entirely in the \textsf{clean} column: the probe under-detects but never cross-confuses the two fault sources.}
+\label{tab:conf}
+\begin{tabular}{@{}l *{3}{>{\centering\arraybackslash}p{5.4em}}@{}}
+\toprule
+\textbf{Ground truth $\downarrow$ / prediction $\rightarrow$} & \textbf{\textsf{clean}} & \textbf{\textsf{world\_drift}} & \textbf{\textsf{halluc}} \\
+\midrule
+\textsf{clean}        & \cellcolor{okgreen}\textbf{8} & 0 & 0 \\
+\textsf{world\_drift} & \cellcolor{missred}8 & \cellcolor{okgreen}\textbf{6} & 0 \\
+\textsf{halluc}       & \cellcolor{missred}7 & 0 & \cellcolor{okgreen}\textbf{1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.60\linewidth]{figs/fig4_confusion.png}
+\caption{Confusion matrix over all 30 trials, and the visible/invisible split of the 14 \textsf{world\_drift} trials.}
+\label{fig:conf}
+\end{figure}
+
+\subsection{Comparison to Attribution-Free Baselines}
+\label{sec:baselines-sec}
+
+Before analysing the recall gap, we ask whether the two-axis probe earns its complexity: does a simpler rule recover the same tool-side faults? Two attribution-free baselines answer this, and their behaviour is fixed by the construction of the testbed rather than measured empirically. An \emph{outcome-only} baseline sees only whether the task ultimately succeeded or failed; it has no channel on which to separate a tool fault from a belief error, so on the fault-source distinction it recovers nothing---zero of the six visible drifts. A \emph{tool-report-only} baseline attributes the fault using only what each tool returned to the agent; because a drift operator is defined as a tool that reports success while silently violating its description, this baseline reads every drift as a clean success, again recovering zero of six. The two-axis probe, which reads the true observed effect rather than the report, recovers all six (Table~\ref{tab:baselines}). The gap is not incidental---it is the whole point of attributing from effect rather than from outcome or report. We state these two baselines analytically because the construction forces their result; an empirical baseline that a model must approximate---an LLM judge over the trajectory---is the comparison we leave to future work (Section~\ref{sec:limits}).
+
+\begin{table}[t]
+\centering
+\caption{Recovery of the six visible tool-side drifts. Both attribution-free baselines miss all six by construction; only a probe that reads the true effect recovers them.}
+\label{tab:baselines}
+\begin{tabular}{@{}l @{\hspace{2em}} c @{\hspace{2em}} l@{}}
+\toprule
+\textbf{Method} & \textbf{Recovers visible drift} & \textbf{Basis} \\
+\midrule
+\emph{outcome-only}         & 0 / 6 & forced by construction \\
+\emph{tool-report-only}     & 0 / 6 & forced by construction \\
+\rowcolor{okgreen} \textbf{two-axis probe (ours)} & \textbf{6 / 6} & empirical \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Visible and Invisible Drift}
+\label{sec:visible}
+
+A drift can be attributed from an effect only if it leaves a trace in that effect. Of the 14 \textsf{world\_drift} trials, eight do not, for three reasons. Two trials on base~B (B\_drift\_D1, B\_drift\_D4) apply a write-corrupting operator to a workflow that only deletes, so nothing changes. Three D2 trials (A\_drift\_D2, C\_drift\_D2, D\_drift\_D2) have the agent recover from the undocumented lock and retry, so the final filesystem is identical to a clean run. And three trials touch only tool internals: E\_drift\_D3 alters a return format only; F\_drift\_D6 and G\_drift\_D6 serve stale reads whose following writes are themselves well-formed, so only the choice of target is wrong, not the write. These eight are unattributable in principle---no probe reading the effect could recover them---and are reported separately rather than counted as errors.
+
+Setting these eight aside isolates the cases where attribution is even possible. On the remaining 22-trial visible subset---all clean and hallucination trials, plus the six drifts that do leave a trace---the picture changes sharply: tool-side attribution becomes exact (drift $\mathrm{P}{=}\mathrm{R}{=}\mathrm{F1}{=}1.00$, all six visible drifts recovered), and overall accuracy rises from $0.50$ to $0.68$; the design-time-visible row of Table~\ref{tab:verified} records this. The two-axis mechanism recovers the fault source whenever the fault is observable at all; the earlier recall gap for drift was almost entirely the invisible trials, not the probe.
+
+\subsection{Belief-Side Attribution}
+\label{sec:belief}
+
+Hallucination recall stays at $0.12$ even on the visible subset, and the reason is worth stating carefully, because it is not what the number first suggests. We inspected all eight \textsf{halluc} trials individually against the true final world. In six of them the agent's closing report matched what had actually happened. B\_halluc2 is representative: the task was built to tempt the agent into overlooking files inside a subfolder and reporting too low a count; instead the agent listed the subfolder, counted four files, and wrote four. A seventh trial, B\_halluc, is ambiguous rather than clearly negative---the seed includes a hidden dotfile, the agent reports only the visible files, and whether that counts as an error depends on whether ``files'' was meant to include hidden ones, which the task does not say. The trial is labelled \textsf{halluc} because the task was designed to invite a belief error, but at temperature 0 this capable backbone simply did not commit one.
+
+One trial, C\_halluc, does contain a genuine belief error, and the probe catches it. The task asks the agent to move a file so that it lives under \texttt{notes/}. The agent instead copies the file, leaves the original in place, and reports that the relocation is complete. Because the canary now appears in two locations rather than one, the probe reads the duplication as a belief-side failure: the agent believes it moved a file it in fact only copied. This is the single case the probe flags, and it flags no clean trial as a hallucination, which is why belief-side precision is $1.00$.
+
+The low recall, then, reflects the trials more than the probe: seven of the eight \textsf{halluc} trials contained no belief error for any method to detect. The one that did was detected. This does, however, point to a real weakness in how the testbed assigns ground truth, which we address in Section~\ref{sec:verified-sec} by re-scoring against what actually occurred.
+
+\subsection{Post-hoc Verified Ground Truth}
+\label{sec:verified-sec}
+
+Section~\ref{sec:belief} showed that seven of the eight \textsf{halluc}-designed trials contained no belief error to detect: the design-time label marked a task built to invite a hallucination, not one in which a hallucination occurred. Scoring against those labels therefore penalises the probe for correctly staying silent. We re-score under a verified ground truth that replaces each design-time label with what actually happened at run time, following the protocol in Fig.~\ref{fig:verif}: designed fault $\rightarrow$ agent execution $\rightarrow$ actual trajectory and final world $\rightarrow$ post-hoc verification $\rightarrow$ actual label $\rightarrow$ attribution.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.70\linewidth]{figs/fig5_verif.png}
+\caption{From a design-time label to a post-hoc verified ground truth, and the verification outcome on the eight \textsf{halluc}-designed trials: six show no belief error, one is ambiguous, one is a genuine hallucination the probe catches.}
+\label{fig:verif}
+\end{figure}
+
+The verification touches only the eight \textsf{halluc}-designed trials---\textsf{clean} and \textsf{drift} labels are fixed by injection, not by agent behaviour. Of the eight, six show no belief error and are relabelled \textsf{clean}, one (B\_halluc) is ambiguous and set aside, and one (C\_halluc) is a genuine belief error. Table~\ref{tab:verified} compares attribution under the two label sets. Under verified labels the overall accuracy over the 29 scored trials rises to $0.72$, and on the visible subset---every trial whose fault can leave a trace, with verified ground truth---the probe attributes all 21 correctly: 14 \textsf{clean}, 6 \textsf{drift}, and the single genuine hallucination.
+
+\begin{table}[t]
+\centering
+\caption{Attribution under design-time versus post-hoc verified labels. Verifying what actually occurred removes the penalty for correctly-silent \textsf{halluc} trials; on observable, verified trials the probe is exact. The belief column denotes genuine belief errors caught over genuine belief errors present.}
+\label{tab:verified}
+\begin{tabularx}{0.98\linewidth}{@{}l @{\hspace{1.6em}} S[table-format=2.0] @{\hspace{1.4em}} S @{\hspace{1.4em}} S @{\hspace{1.8em}} X@{}}
+\toprule
+\textbf{Label set} & {\textbf{Scored n}} & {\textbf{Accuracy}} & {\textbf{Drift F1}} & \textbf{Belief evidence} \\
+\midrule
+design-time, all      & 30 & 0.50 & 0.60 & 1 caught / 8 labelled \\
+design-time, visible  & 22 & 0.68 & 1.00 & 1 caught / 8 labelled \\
+verified, all         & 29 & 0.72 & 0.60 & 1 / 1 genuine \\
+\rowcolor{okgreen} \textbf{verified, visible} & \textbf{21} & \textbf{1.00} & \textbf{1.00} & \textbf{1 / 1 genuine} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Two caveats bound this result. First, the visible subset still excludes the eight invisible drifts, which no effect-based probe can recover. Second, and more important, the verified \textsf{halluc} class contains exactly one trial: belief-side attribution is demonstrated here as an existence proof---the one genuine belief error is caught, with no false positive on any clean trial---not as a rate. Establishing a belief-side recall worth reporting requires a testbed that reliably induces belief errors---many runs, higher temperature, or weaker backbones---which we identify as the priority next experiment.
+
+\section{Limitations}
+\label{sec:limits}
+
+\smallskip\noindent\emph{Belief-side ground truth rests on a single trial.} We now report both design-time and post-hoc verified labels (Section~\ref{sec:verified-sec}), which removes the earlier objection that attribution was measured against labels that need not hold at run time. The residual limitation is sharper: with this backbone at temperature~0, only one of eight \textsf{halluc}-designed trials produced a genuine belief error, so belief-side attribution is an existence proof, not a rate. A sound belief-side evaluation needs a testbed that reliably induces belief errors---many runs, higher-temperature sampling, or weaker backbones.
+
+\smallskip\noindent\emph{The oracle, and the baselines, are rule-based.} Both axes are deterministic checks over perfect evidence---intentional, since it measures what the two-axis formulation can recover in principle, but it means axis~B only catches errors reducible to a canary or a no-change signal. Belief errors that require reading the semantics of a report---an agent that miscounts while the canary is present and correct---are outside its reach. The two baselines of Section~\ref{sec:baselines-sec} are likewise analytical; extending axis~B with a model-based judge and benchmarking it against an LLM-judge baseline is a natural next step.
+
+\smallskip\noindent\emph{A single backbone and domain.} All trials run one model on one filesystem server; the invisible-drift analysis in particular is entangled with agent behaviour (three D2 trials are unattributable precisely because this agent recovered from the lock, and a weaker agent might leave a detectable trace). Results across several backbones, and a second tool domain with numeric rather than filesystem effects, are needed before the visibility boundary can be claimed as a property of the operators rather than of one agent.
+
+\smallskip\noindent\emph{Attribution is not yet repair.} We show that fault sources can be recovered when they are observable; we do not yet show that recovering them leads to better recovery than retrying blindly, an experiment we leave to future work.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We asked whether a divergent tool can be told apart from an agent's own mistaken belief when the true cause of a failure is known, and built a controlled testbed and two-axis probe to answer it. When a fault leaves any trace in the observed effect the tool-side axis recovers it exactly, both fault classes are attributed with perfect precision, and two attribution-free baselines recover none by construction; what the probe misses, it misses by staying silent rather than by confusing one cause for the other. Much of that silence is a property of the trials---eight of fourteen drifts leave no trace, and six of eight hallucination-designed tasks provoked no hallucination in a capable model at temperature zero; a post-hoc verified ground truth confirms the point on the observable trials and shows that the testbed yielded only one genuine belief error. Two directions follow: extend axis~B with a model-based judge and benchmark it against an LLM-judge baseline, quantifying how much attribution survives without perfect evidence; and show that a recovered fault source leads to better recovery than retrying blindly---and that an agent knows when to stop and defer to a human. The present work is the controlled first step those experiments need.
+
+\begin{thebibliography}{8}
+\footnotesize
+\setlength{\itemsep}{0pt plus 0.3pt}
+\bibitem{mcpatlas}
+Bandi, C., et al.: MCP-Atlas: A Large-Scale Benchmark for Tool-Use Competency with Real MCP Servers. arXiv:2602.00933 (2026)
+
+\bibitem{mcpagentbench}
+Liu, W., et al.: MCPAgentBench: A Real-world Task Benchmark for Evaluating LLM Agent MCP Tool Use. arXiv:2512.24565 (2026)
+
+\bibitem{agentprop}
+Evaluating Tool-Using Language Agents: Judge Reliability, Propagation Cascades, and Runtime Mitigation in AgentProp-Bench. arXiv:2604.16706 (2026)
+
+\bibitem{agentrx}
+Barke, S., Goyal, A., Khare, A., Singh, A., Nath, S., Bansal, C.: AgentRx: Diagnosing AI Agent Failures from Execution Trajectories. arXiv:2602.02475 (2026)
+
+\bibitem{trajaudit}
+Wang, M., Xie, X., Huo, Y.: TrajAudit: Automated Failure Diagnosis for Agentic Coding Systems. arXiv:2605.26563 (2026)
+
+\bibitem{agentatlas}
+AgentAtlas: Beyond Outcome Leaderboards for LLM Agents. arXiv:2605.20530 (2026)
+
+\bibitem{mcpmislead}
+Li, Z., et al.: Don't Believe Everything You Read: Understanding and Measuring MCP Behavior under Misleading Tool Descriptions. arXiv:2602.03580 (2026)
+
+\bibitem{mcpincon}
+Shi, Y., et al.: Description-Code Inconsistency in Real-world MCP Servers: Measurement, Detection, and Security Implications. arXiv:2606.04769 (2026)
+\end{thebibliography}
+
+\end{document}
