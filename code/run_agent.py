@@ -87,8 +87,18 @@ def _thinking_trace(msg) -> str | None:
     if rc:
         return rc
     content = msg.content or ""
-    if "<think>" in content:
-        return content[content.index("<think>"):]
+    # Both tags are checked, and the CLOSING one is the load-bearing test.
+    # Qwen3.5's chat template puts the OPENING <think> in the prompt, not the
+    # completion: with enable_thinking=false it prefills an already-closed
+    # "<think>\n\n</think>", and when the flag is ignored it prefills a bare
+    # "<think>\n" and lets the model reason until it emits "</think>". So a
+    # leaked reasoning trace typically arrives as "...reasoning...</think>real
+    # answer" with no "<think>" anywhere in `content`, and a guard that only
+    # looked for the opening tag would pass the very run it exists to catch.
+    for tag in ("<think>", "</think>"):
+        if tag in content:
+            return content[:content.index(tag) + len(tag)] if tag == "</think>" \
+                else content[content.index(tag):]
     return None
 
 
