@@ -16,6 +16,14 @@ REPO="${1:?usage: serve.sh <hf-repo> <tool-call-parser> [extra args]}"
 PARSER="${2:?usage: serve.sh <hf-repo> <tool-call-parser> [extra args]}"
 shift 2
 
+# SERVE_PATH loads a LOCAL snapshot directory while still advertising the
+# canonical repo id as the model name, so trial records keep the repo as
+# provenance. Needed for Mistral-Nemo: its Hub repo carries the same weights
+# twice -- five HF shards AND a 22.8 GiB consolidated.safetensors -- and vLLM's
+# auto load format goes for the consolidated file, a second full download this
+# disk cannot hold. Pointed at the local directory it sees only the shards.
+SERVE_PATH="${SERVE_PATH:-$REPO}"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SLUG="$(echo "$REPO" | tr '/' '_')"
 LOG="$ROOT/logs/vllm_${SLUG}.log"
@@ -35,9 +43,10 @@ done
 : > "$LOG"
 tmux new-session -d -s vllm \
   "source /venv/main/bin/activate && \
-   export HF_TOKEN='${HF_TOKEN:-}' VLLM_USE_FLASHINFER_SAMPLER=0 && \
+   set -a && . '$ROOT/.env' && set +a && \
+   export VLLM_USE_FLASHINFER_SAMPLER=0 && \
    date +%s.%N > '$TS' && \
-   vllm serve '$REPO' --served-model-name '$REPO' \
+   vllm serve '$SERVE_PATH' --served-model-name '$REPO' \
      --max-model-len 16384 --gpu-memory-utilization 0.90 \
      --tool-call-parser '$PARSER' --enable-auto-tool-choice \
      --port 8000 $* >> '$LOG' 2>&1"

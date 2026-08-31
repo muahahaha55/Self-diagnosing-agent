@@ -1,6 +1,6 @@
 # exp_a — Block 2 run plan and code-gap log
 
-Status: **in progress**. This file is the running log for Block 2. It records the
+Status: **complete — 270/270 trials, not yet pushed**. This file is the running log for Block 2. It records the
 allocation actually executed and every gap between what Block 2 asks for and what
 the frozen v3 testbed can do.
 
@@ -141,6 +141,91 @@ the 270 and are not re-run.
 Against the baseline step distribution (30 trials, 90 tool calls, mean 3.0,
 max 10) that is ~1.9 min per cell, ~17 min for all nine cells, plus ~5.5 min per
 model load and the Llama/Mistral downloads.
+
+## Outcome — 270/270 complete (2026-08-31)
+
+**Read this paragraph and nothing else if you are catching up.** All nine cells
+are at 30/30, one record per task id, no duplicates and no gaps. Nothing hit a
+stop rule: no reasoning trace on any Qwen trial (nor anywhere in the other 180),
+and no backbone was skipped. The three backbone runs each needed a serving fix
+before their first trial, all documented below; none of them changed the
+experiment. **The results are committed locally but NOT pushed — this host has
+no GitHub credentials** (`git push` fails with "could not read Username"), so
+three commits on `paper/block-0` are waiting for a push from somewhere that has
+a token.
+
+| Cell | Trials | Tool calls | Zero-step | No effect |
+|---|---|---|---|---|
+| Qwen3.5-9B T=0 | 30 | 85 | 0 | 0 |
+| Qwen3.5-9B T=0.7 s1234 | 30 | 93 | 0 | 0 |
+| Qwen3.5-9B T=0.7 s5678 | 30 | 82 | 0 | 0 |
+| Llama-3.1-8B T=0 | 30 | 166 | 0 | 3 |
+| Llama-3.1-8B T=0.7 s1234 | 30 | 153 | 0 | 2 |
+| Llama-3.1-8B T=0.7 s5678 | 30 | 130 | 0 | 3 |
+| Mistral-Nemo-12B T=0 | 30 | 70 | 0 | 4 |
+| Mistral-Nemo-12B T=0.7 s1234 | 30 | 61 | 1 | 4 |
+| Mistral-Nemo-12B T=0.7 s5678 | 30 | 78 | 0 | 3 |
+| **Total** | **270** | **918** | **1** | **19** |
+
+Integrity check over the merged raw files: every cell holds exactly the 30 task
+ids, `backbone` / `temperature` / `sampling_seed` are single-valued per cell, and
+no trial carries a null `ref_clean_steps`. 153 trials declare a canary; 11 of
+those canaries are absent, which is a result about the fault modes, not a fault
+in the run.
+
+### The one zero-step trial is a parse failure, not a refusal
+
+`E_halluc` in Mistral T=0.7 s1234 recorded `n_tool_calls=0`, and it is worth
+knowing why before anyone treats it as "the model chose not to act". The model
+emitted a malformed `[TOOL_CALLS]` block — several calls, mismatched brackets —
+and the mistral parser declined it, so the whole thing survives as
+`final_answer` text instead of as tool calls. The record is faithful and the raw
+string is in the trial, but a step-count analysis will read this trial as a
+zero-step success unless it is excluded or hand-scored. Re-running would not
+help: the cell is seeded, so the same sampling path reproduces. 269 of 270
+trials parsed cleanly, so this is one bad sample, not a parser mismatch.
+
+### Serving fixes, per backbone
+
+| Backbone | Parser | What it needed |
+|---|---|---|
+| Qwen3.5-9B | `qwen3_xml` | nothing beyond the three environment fixes below |
+| Llama-3.1-8B-Instruct | `llama3_json` | nothing; worked first try |
+| Mistral-Nemo-12B | `mistral` | an HF-only view of the snapshot + `--chat-template` (below) |
+
+Mistral-Nemo took four attempts and none of the failures was the parser, which
+is exactly the trap the stop rule was written for — each one *looked* like one:
+
+1. Serving by repo id made vLLM go for `consolidated.safetensors`, a second
+   22.8 GiB copy of weights already on disk as HF shards. With 12 GiB free the
+   xet writer died mid-download ("File reconstruction error"). Fixed by serving
+   the local snapshot directory (`SERVE_PATH` in `scripts/serve.sh`) while still
+   advertising the canonical repo id as the model name.
+2. Every request then failed with "As of transformers v4.44, default chat
+   template is no longer allowed". transformers 5.x no longer reads
+   `chat_template` out of `tokenizer_config.json`, and this repo predates the
+   separate `chat_template.jinja` that Qwen and Llama ship. The template was
+   copied verbatim into `configs/mistral_nemo_chat_template.jinja`.
+3. Passing that file with `--chat-template` returned 501, "`MistralCommonBackend`
+   does not implement `get_chat_template`": the presence of `tekken.json` and
+   `params.json` in the directory makes vLLM choose Mistral's own tokenizer.
+4. `--tokenizer-mode mistral` (the canonical Mistral path) rejects
+   `chat_template_kwargs`, which `run_agent.py` sends on every call — so that
+   route would have failed on all 90 trials, not just the smoke test.
+
+What works: a directory of symlinks to the same snapshot with `tekken.json` and
+`params.json` left out, which makes it an ordinary HF model, plus the repo's own
+template via `--chat-template` and `--tool-call-parser mistral`. Rebuilt by
+`scripts/pick_parser.sh`'s fallback path; the winning configuration is recorded
+in `logs/parser_mistralai_Mistral-Nemo-Instruct-2407.txt`.
+
+### Timing, measured
+
+Model loads 331 s (Qwen, cold) / 266 s (Llama) / ~80 s (Mistral, warm compile
+cache). Trials cost about 0.95 s + 0.95 s per tool call, so a 30-task cell runs
+in roughly two to five minutes depending on how many steps the backbone takes.
+Llama spends about twice Qwen's steps on the same tasks and Mistral about
+four-fifths of Qwen's; that is a finding for the analysis, not a run problem.
 
 ## Llama access — resolved
 
